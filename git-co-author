@@ -7,32 +7,42 @@ readonly USAGE="usage: git co-author                Show co-authors in commit te
    or: git co-author <initials>...  Update co-authors in commit template
    or: git co-author authors        List authors in git config
    or: git co-author clear          Remove all co-authors from commit template
-   or: git co-author find           Find authors in git log"
+   or: git co-author select         Select authors in gitconfig or log if config is empty"
 
 main() {
   if [[ $# -eq 0 ]]
   then
-    show_trailers
+    trailers="$(show_trailers)"
+    if [[ -z "$trailers" ]]
+    then
+      print_none
+    else
+      printf '%s\n' "$trailers"
+    fi
+    exit 0
   fi
 
   for arg in "$@"
   do
-    if [[ "$arg" = "-h" ]]
+    if [[ "$arg" = "-h" ]] || [[ "$arg" = "--help" ]];
     then
       print_usage
+      exit 0
     fi
   done
-
   case "$1" in
   authors)
     list_authors
+    exit 0
     ;;
   clear)
     clear_trailers
+    exit 0
     ;;
-  find)
-    find_authors
-    ;;
+  select)
+    shift
+    select_authors "$@"
+    exit 0
   esac
 
   update_trailers "$@"
@@ -41,23 +51,23 @@ main() {
 show_trailers() {
   ensure_template_file
   print_trailers
-  exit 0
 }
 
 print_usage() {
   echo "$USAGE"
-  exit 0
+}
+
+print_none() {
+  printf '%s\n' "No co-authors in commit template"
 }
 
 clear_trailers() {
   ensure_template_file
   remove_trailers
-  exit 0
 }
 
 list_authors() {
-  print_configured_authors
-  exit 0
+  find_authors
 }
 
 find_authors() {
@@ -65,8 +75,50 @@ find_authors() {
     git log --pretty="%an <%ae>";
     git log --pretty="%(trailers:key=Co-authored-by,valueonly,only)" | awk NF;
   } | sort | uniq
-  exit 0
 }
+
+select_authors() {
+  if [[ $# -eq 0 ]]; then
+    select_authors_from_pool
+  else
+    use_configured_authors_only "$@"
+  fi
+}
+
+select_authors_from_pool() {
+  local configured_authors="", selected_authors=""
+  configured_authors="$(git config --get-regexp 'co-authors.*')" || true
+  readonly configured_authors
+  local -r configured_authors_without_config_prefix="$(printf '%s' "${configured_authors}" | cut -d' ' -f2-)"
+  selected_authors="$(printf '%s\n%s\n' "${configured_authors_without_config_prefix}" "$(find_authors)" | fzf --multi)"
+  readonly selected_authors
+  local selected_authors_ary=()
+  if [ -n "${selected_authors}" ]; then
+    while IFS= read -r selected_author; do
+      selected_authors_ary[${#selected_authors_ary[@]}]="${selected_author}"
+    done <<<"${selected_authors}"
+    update_trailers_without_initials "${selected_authors_ary[@]}"
+  fi
+}
+
+use_configured_authors_only() {
+  update_trailers "$@"
+}
+
+update_trailers_without_initials() {
+  ensure_template_file
+  remove_trailers
+  add_trailers_without_initials "$@"
+  print_trailers
+}
+
+add_trailers_without_initials() {
+  for user in "$@";
+  do
+    git interpret-trailers --trailer "$TRAILER_TOKEN: $user" --in-place "$template_file"
+  done
+}
+
 
 update_trailers() {
   ensure_template_file
@@ -74,7 +126,6 @@ update_trailers() {
   remove_trailers
   add_trailers "$@"
   print_trailers
-  exit 0
 }
 
 abort() {
@@ -151,5 +202,25 @@ Example:
       sort
   fi
 }
+
+check_requirements() {
+  if ! command -v fzf > /dev/null ; then
+    abort "Missing required 'fzf'"
+  fi
+}
+
+NEW_AUTHOR_INITIALS=""
+configure_author_initials() {
+  local author="$1"
+  local initials="" first_init="" second_init="" second_char=""
+  git_full_names_no_characters="$(printf '%s' "${author}" | cut -d '<' -f1 | tr '-' ' ' | grep --color=none -o '[A-z0-9[:space:]]*')"
+  first_init="$(printf '%s' "${git_full_names_no_characters}" | awk '{print substr($1,1,1)}' | tr -d '[:space:]')"
+  second_init="$(printf '%s' "${git_full_names_no_characters}" | cut -d' ' -f2 | cut -c1 | tr -d '[:space]')"
+  second_char="$(printf '%s' "${git_full_names_no_characters}" | cut -c2 | tr -d '[:space:]')"
+  initials="$(printf '%s' "${first_init}${second_init}${second_char}" | tr -d '[:space:]' | cut -c1-2 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  NEW_AUTHOR_INITIALS="${initials}"
+  git config --global "co-authors.${initials}" "${author}" > /dev/null
+}
+
 
 main "$@"
